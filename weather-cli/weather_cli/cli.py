@@ -1,83 +1,84 @@
-import sys, webbrowser, requests, json, datetime
+import os
+import sys
+import datetime
+import argparse
 
-OPEN_WEATHER_URL = 'http://api.openweathermap.org'
+import requests
+from dotenv import load_dotenv
 
-def overview(info):
-    # core fields
-    city = info.get('name', '?')
-    cc = info.get('sys', {}).get('country', '')
-    desc = info['weather'][0]['description'].title()
-    lat = info['coord']['lat']
-    lon = info['coord']['lon']
+load_dotenv()
 
-    main = info['main']
-    t_c = main['temp'] - 273.15
-    fl_c = main['feels_like'] - 273.15
-    hum = main['humidity']
-    pres = main['pressure']
+OPENWEATHER_BASE = "https://api.openweathermap.org"
+_WIND_DIRS = ["N","NNE","NE","ENE","E","ESE","SE","SSE","S","SSW","SW","WSW","W","WNW","NW","NNW"]
 
-    wind = info.get('wind', {})
-    wspd = wind.get('speed', 0)
-    wdeg = wind.get('deg', 0)
-    gust = wind.get('gust')
 
-    clouds = info.get('clouds', {}).get('all')
-    vis_km = info.get('visibility', 0) / 1000
-    rain_1h = info.get('rain', {}).get('1h')
+def _wind_dir(degrees):
+    return _WIND_DIRS[int((degrees + 11.25) // 22.5) % 16]
 
-    tz = datetime.timezone(datetime.timedelta(seconds=info.get('timezone',0)))
-    sr = datetime.datetime.fromtimestamp(info['sys']['sunrise'], tz).strftime('%H:%M')
-    ss = datetime.datetime.fromtimestamp(info['sys']['sunset'], tz).strftime('%H:%M')
 
-    def wind_dir(d):
-        dirs = ['N','NNE','NE','ENE','E','ESE','SE','SSE','S','SSW','SW','WSW','W','WNW','NW','NNW']
-        return dirs[int((d+11.25)//22.5) % 16]
+def _format(data):
+    city = data.get("name", "?")
+    cc = data.get("sys", {}).get("country", "")
+    desc = data["weather"][0]["description"].title()
+    lat, lon = data["coord"]["lat"], data["coord"]["lon"]
 
-    # build lines
-    lines = []
-    lines.append(f"{city}, {cc} • {desc}")
-    lines.append(f"{lat:.2f}, {lon:.2f}\n")
-    lines.append(f"{t_c:.0f}°C feels {fl_c:.0f}°C")
-    lines.append(f"Humidity {hum}% • Pressure {pres} hPa")
+    main = data["main"]
+    temp = main["temp"] - 273.15
+    feels = main["feels_like"] - 273.15
 
-    wind_line = f"Wind {wspd:.1f} m/s {wind_dir(wdeg)}"
-    if gust:
+    wind = data.get("wind", {})
+    wind_line = f"Wind {wind.get('speed', 0):.1f} m/s {_wind_dir(wind.get('deg', 0))}"
+    if gust := wind.get("gust"):
         wind_line += f" gust {gust:.1f}"
-    if rain_1h:
-        wind_line += f" • Rain {rain_1h:.1f} mm/h"
-    lines.append(wind_line)
+    if rain := data.get("rain", {}).get("1h"):
+        wind_line += f" • Rain {rain:.1f} mm/h"
 
-    lines.append(f"Clouds {clouds}% • Visibility {vis_km:.0f} km")
-    lines.append(f"Sunrise {sr} • Sunset {ss}")
+    tz = datetime.timezone(datetime.timedelta(seconds=data.get("timezone", 0)))
 
+    def fmt(ts):
+        return datetime.datetime.fromtimestamp(ts, tz).strftime("%H:%M")
+
+    lines = [
+        f"{city}, {cc} • {desc}",
+        f"{lat:.2f}, {lon:.2f}\n",
+        f"{temp:.0f}°C feels {feels:.0f}°C",
+        f"Humidity {main['humidity']}% • Pressure {main['pressure']} hPa",
+        wind_line,
+        f"Clouds {data.get('clouds', {}).get('all')}% • Visibility {data.get('visibility', 0) / 1000:.0f} km",
+        f"Sunrise {fmt(data['sys']['sunrise'])} • Sunset {fmt(data['sys']['sunset'])}",
+    ]
     return "\n".join(lines)
 
-def get_weather(city,country):
 
-    # Reverse Geo Coding
-    reverse_geo_limit = 1
-    APP_ID = 'e1f83a674bb103eeb69d7615d0279fc6'
-    response = requests.get(f"{OPEN_WEATHER_URL}/geo/1.0/direct?q={city},{country}&limit={reverse_geo_limit}&appid={APP_ID}")
-    data = response.json()
-    info = data[0]
-    lat,lon= info['lat'],info['lon']
+def get_weather(city, country):
+    api_key = os.environ.get("OPENWEATHER_API_KEY")
+    if not api_key:
+        sys.exit("Error: OPENWEATHER_API_KEY environment variable not set.")
 
-    # weather data
-    response = requests.get(f"{OPEN_WEATHER_URL}/data/2.5/weather?lat={lat}&lon={lon}&appid={APP_ID}")
-    data = response.json()
-    result = overview(data)
-    print(result)
+    session = requests.Session()
+
+    geo = session.get(
+        f"{OPENWEATHER_BASE}/geo/1.0/direct",
+        params={"q": f"{city},{country}", "limit": 1, "appid": api_key},
+    )
+    geo.raise_for_status()
+    locations = geo.json()
+    if not locations:
+        sys.exit(f"Error: city '{city}' not found.")
+
+    lat, lon = locations[0]["lat"], locations[0]["lon"]
+
+    weather = session.get(
+        f"{OPENWEATHER_BASE}/data/2.5/weather",
+        params={"lat": lat, "lon": lon, "appid": api_key},
+    )
+    weather.raise_for_status()
+    print(_format(weather.json()))
+
 
 def main():
-    args_len = len(sys.argv)
-
-    if args_len < 2 or args_len > 3:
-        raise ValueError("expected city country as argument")
-    
-    address_list = sys.argv[1:]
-    city = address_list[0]
-    country = address_list[1]
-    get_weather(city=city,country=country)
-
-if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description="Current weather for a city.")
+    parser.add_argument("city")
+    parser.add_argument("country", nargs="?", default="", help="ISO country code (optional)")
+    args = parser.parse_args()
+    get_weather(args.city, args.country)
